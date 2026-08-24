@@ -190,11 +190,15 @@
   speed.value=store.get("speed",70); font.value=store.get("font",46);
   width.value=store.get("width",86); sens.value=store.get("sens",13); linePos.value=store.get("linePos",30);
   $("cleanMd").checked=store.get("cleanMd",true);
+  $("scriptInput").value=store.get("script","");
+  let saveT=null;
+  const saveScript=()=>store.set("script",$("scriptInput").value);
+  $("scriptInput").addEventListener("input",()=>{ clearTimeout(saveT); saveT=setTimeout(saveScript,400); });
   let bandOn=store.get("band",true);
 
   let playing=false, mirror=false, flip=false;
-  let pos=0, lastT=0, raf=null, barTimer=null, panelTimer=null, dragging=false;
-  let voiceOn=false, speaking=false, audioCtx=null, analyser=null, micStream=null, lastVoice=0, vData=null;
+  let pos=0, lastT=0, lastEst=0, raf=null, barTimer=null, panelTimer=null, dragging=false;
+  let voiceOn=false, vTick=false, speaking=false, audioCtx=null, analyser=null, micStream=null, lastVoice=0, vData=null;
   let emaRms=0, noiseFloor=2;
 
   function lp(){ return parseFloat(linePos.value)/100; }
@@ -214,8 +218,13 @@
     }
     let t=out.join("\n");
     t=t.replace(/\[([^\]]+)\]\((?:[^)]+)\)/g,"$1");
-    t=t.replace(/[*_`>]/g,"");
-    t=t.replace(/^\s*[-+]\s+/gm,"");
+    // strip paired emphasis/code markers only, so file_name and snake_case survive
+    t=t.replace(/(\*\*\*|\*\*|\*)([^*\n]+)\1/g,"$2");
+    t=t.replace(/(^|\s)(___|__|_)([^_\n]+)\2(?=\s|[.,;:!?]|$)/gm,"$1$3");
+    t=t.replace(/`([^`\n]+)`/g,"$1");
+    t=t.replace(/^[ \t]*>\s?/gm,"");
+    // each list item becomes its own paragraph instead of a run-on line
+    t=t.replace(/^[ \t]*[-+*][ \t]+(.*)$/gm,"\n$1\n");
     t=t.replace(/\n{3,}/g,"\n\n");
     return t.trim();
   }
@@ -233,7 +242,15 @@
   function applyStyle(){
     content.style.fontSize=font.value+"px";
     content.style.paddingLeft=content.style.paddingRight=((100-width.value)/2)+"vw";
-    content.style.paddingTop=(lp()*100)+"vh";
+    if(flip){
+      // flipped: the document top is drawn at the visual bottom, so swap the
+      // lead-in / lead-out padding to keep line 1 on the reading line at pos 0
+      content.style.paddingTop="calc("+((1-lp())*100)+"vh - "+Math.round(font.value*1.5)+"px)";
+      content.style.paddingBottom=(lp()*100)+"vh";
+    }else{
+      content.style.paddingTop=(lp()*100)+"vh";
+      content.style.paddingBottom="85vh";
+    }
     content.style.transform="scale("+(mirror?-1:1)+","+(flip?-1:1)+")";
     // fixed highlight band: one line tall, centred on the reading line
     const bh=Math.round(font.value*1.5);
@@ -242,7 +259,11 @@
     band.classList.toggle("off",!bandOn);
     speedVal.textContent=speed.value; fontVal.textContent=font.value+"px";
     widthVal.textContent=width.value+"%"; lineVal.textContent=linePos.value+"%";
+    pos=Math.max(0,Math.min(pos,maxScroll()));
+    syncScroll();
   }
+  // flipped content plays back-to-front in scroll space, so map pos accordingly
+  function syncScroll(){ viewport.scrollTop = flip ? maxScroll()-pos : pos; }
   function maxScroll(){ return Math.max(0,content.scrollHeight-viewport.clientHeight); }
   function estimate(){
     const remain=Math.max(0,maxScroll()-pos), secs=speed.value>0?remain/speed.value:0;
@@ -258,9 +279,9 @@
       pos+=speed.value*dt;
       const mx=maxScroll();
       if(pos>=mx){ pos=mx; setPlaying(false); }
-      viewport.scrollTop=pos;
+      syncScroll();
     }
-    estimate();
+    if(advance || t-lastEst>500){ lastEst=t; estimate(); }
     raf=requestAnimationFrame(frame);
   }
   function startLoop(){ if(!raf){ lastT=0; raf=requestAnimationFrame(frame);} }
@@ -322,7 +343,7 @@
       analyser=audioCtx.createAnalyser(); analyser.fftSize=512; vData=new Uint8Array(analyser.fftSize);
       src.connect(analyser);
       voiceOn=true; voiceBtn.classList.add("on"); sensRow.style.display=""; vmeterWrap.style.display="";
-      emaRms=0; noiseFloor=2; setPlaying(true); tickVoice();
+      emaRms=0; noiseFloor=2; setPlaying(true); if(!vTick){ vTick=true; tickVoice(); }
     }catch(e){
       voiceOn=false; voiceBtn.classList.remove("on"); statusEl.innerHTML="Mic off";
       alert("Could not access the microphone. Allow mic access to use voice-paced scrolling. The rest of the teleprompter works without it.");
@@ -335,7 +356,7 @@
     setStatus();
   }
   function tickVoice(){
-    if(!voiceOn) return;
+    if(!voiceOn){ vTick=false; return; }
     const rms=rmsNow();
     emaRms=emaRms*0.78+rms*0.22;
     if(emaRms<noiseFloor) noiseFloor=noiseFloor*0.9+emaRms*0.1;
@@ -351,9 +372,10 @@
 
   // ---------- mode switching ----------
   function startTeleprompter(){
+    saveScript();
     buildContent($("scriptInput").value||"");
     setup.style.display="none"; stage.style.display="block";
-    applyStyle(); pos=0; viewport.scrollTop=0; setPlaying(false); showBar();
+    pos=0; applyStyle(); syncScroll(); setPlaying(false); showBar();
     startLoop();
   }
   function backToEdit(){
@@ -362,8 +384,11 @@
   }
   function toggleFullscreen(){
     const el=document.documentElement;
-    if(!document.fullscreenElement){ (el.requestFullscreen||el.webkitRequestFullscreen).call(el); }
-    else { (document.exitFullscreen||document.webkitExitFullscreen).call(document); }
+    if(!document.fullscreenElement&&!document.webkitFullscreenElement){
+      const fn=el.requestFullscreen||el.webkitRequestFullscreen; if(fn) try{ fn.call(el); }catch(_){}
+    } else {
+      const fn=document.exitFullscreen||document.webkitExitFullscreen; if(fn) try{ fn.call(document); }catch(_){}
+    }
   }
 
   // ---------- events ----------
@@ -382,7 +407,7 @@
         await loadScript("https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js");
         window.pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
       }
-      const pdf=await window.pdfjsLib.getDocument({data:await f.arrayBuffer()}).promise;
+      const pdf=await window.pdfjsLib.getDocument({data:await f.arrayBuffer(),isEvalSupported:false}).promise;
       let text="";
       for(let i=1;i<=pdf.numPages;i++){ const pg=await pdf.getPage(i); const tc=await pg.getTextContent(); text+=tc.items.map(s=>s.str).join(" ")+"\n\n"; }
       return text;
@@ -391,14 +416,14 @@
   }
   $("fileInput").onchange=async e=>{
     const f=e.target.files[0]; if(!f) return;
-    try{ $("scriptInput").value=await readUploaded(f); }
+    try{ $("scriptInput").value=await readUploaded(f); saveScript(); }
     catch(err){ alert("Could not read that file. For .docx and .pdf you need to be online the first time (a small reader loads). .txt and .md always work."); }
     e.target.value="";
   };
   $("cleanMd").onchange=()=>store.set("cleanMd",$("cleanMd").checked);
 
   playBtn.onclick=()=>setPlaying(!playing);
-  restartBtn.onclick=()=>{ pos=0; viewport.scrollTop=0; showBar(); };
+  restartBtn.onclick=()=>{ pos=0; syncScroll(); showBar(); };
   editBtn.onclick=backToEdit;
   hlBtn.onclick=()=>{ bandOn=!bandOn; store.set("band",bandOn); band.classList.toggle("off",!bandOn); hlBtn.classList.toggle("on",bandOn); };
   mirrorBtn.onclick=()=>{ mirror=!mirror; mirrorBtn.classList.toggle("on",mirror); applyStyle(); };
@@ -426,8 +451,8 @@
     const dy=e.clientY-dragStartY;
     if(!dragMoved && Math.abs(dy)>DRAG_THRESH){ dragMoved=true; dragging=true; viewport.classList.add("dragging"); }
     if(dragMoved){
-      pos=Math.max(0,Math.min(maxScroll(), dragStartPos-dy));
-      viewport.scrollTop=pos; estimate();
+      pos=Math.max(0,Math.min(maxScroll(), flip ? dragStartPos+dy : dragStartPos-dy));
+      syncScroll(); estimate();
     }
   });
   function endPointer(){
@@ -441,7 +466,9 @@
   $("peek").addEventListener("click",showBar);
 
   document.addEventListener("keydown",e=>{
-    if(stage.style.display==="none") return;
+    const tgt=e.target;
+    if(tgt&&(tgt.tagName==="TEXTAREA"||tgt.tagName==="INPUT"||tgt.tagName==="SELECT")) return;
+    if(getComputedStyle(stage).display==="none") return;
     if(e.code==="Space"){ e.preventDefault(); setPlaying(!playing); }
     else if(e.key==="ArrowUp"){ e.preventDefault(); speed.value=Math.min(220,+speed.value+8); speed.oninput(); }
     else if(e.key==="ArrowDown"){ e.preventDefault(); speed.value=Math.max(10,+speed.value-8); speed.oninput(); }

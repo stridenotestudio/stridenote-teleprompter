@@ -10,13 +10,29 @@ android {
         applicationId "net.stridenote.teleprompter"
         minSdk 24
         targetSdk 34
-        versionCode 2
+        // CI passes -Pvcode=<run number> so every release is installable over the last
+        versionCode project.hasProperty('vcode') ? project.property('vcode').toInteger() : 3
         versionName "1.1"
+    }
+
+    signingConfigs {
+        release {
+            def ks = System.getenv("RELEASE_KEYSTORE")
+            if (ks != null) {
+                storeFile file(ks)
+                storePassword System.getenv("RELEASE_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("RELEASE_KEY_ALIAS")
+                keyPassword System.getenv("RELEASE_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
         release {
             minifyEnabled false
+            if (System.getenv("RELEASE_KEYSTORE") != null) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 

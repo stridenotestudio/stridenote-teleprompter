@@ -51,13 +51,18 @@ public class MainActivity extends Activity {
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
-        s.setAllowFileAccess(true);
-        s.setMediaPlaybackRequiresUserGesture(false);
+        s.setAllowFileAccess(false);   // everything is served by the asset loader
 
         web.setWebViewClient(new WebViewClient() {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 return assetLoader.shouldInterceptRequest(request.getUrl());
+            }
+
+            // Keep the WebView on the in-app origin; anything else is refused.
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                return !"appassets.androidplatform.net".equals(request.getUrl().getHost());
             }
         });
 
@@ -72,7 +77,7 @@ public class MainActivity extends Activity {
                             pendingPermission = request;
                             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_MIC);
                         } else {
-                            request.grant(request.getResources());
+                            grantAudioOnly(request);
                         }
                     }
                 });
@@ -116,7 +121,7 @@ public class MainActivity extends Activity {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQ_MIC && pendingPermission != null) {
             if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                pendingPermission.grant(pendingPermission.getResources());
+                grantAudioOnly(pendingPermission);
             } else {
                 pendingPermission.deny();
             }
@@ -124,12 +129,30 @@ public class MainActivity extends Activity {
         }
     }
 
+    // Grant the page only the microphone, never whatever else it asked for.
+    private static void grantAudioOnly(PermissionRequest request) {
+        for (String r : request.getResources()) {
+            if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(r)) {
+                request.grant(new String[]{PermissionRequest.RESOURCE_AUDIO_CAPTURE});
+                return;
+            }
+        }
+        request.deny();
+    }
+
     @Override
     public void onBackPressed() {
-        if (web != null && web.canGoBack()) {
-            web.goBack();
-        } else {
-            super.onBackPressed();
-        }
+        if (web == null) { super.onBackPressed(); return; }
+        // If the reading stage is open, back returns to the editor instead of
+        // killing the app (and the pasted script) mid-read.
+        web.evaluateJavascript(
+                "(function(){var s=document.getElementById('stage');" +
+                "if(s&&getComputedStyle(s).display!=='none'){document.getElementById('editBtn').click();return true;}" +
+                "return false;})()",
+                new ValueCallback<String>() {
+                    @Override public void onReceiveValue(String handled) {
+                        if (!"true".equals(handled)) { finish(); }
+                    }
+                });
     }
 }
